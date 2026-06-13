@@ -13,7 +13,6 @@ PLAYERS = [
     "Donk",
 ]
 
-
 DATABASE_URL = os.environ["DATABASE_URL"]
 CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "contact@example.com")
 
@@ -23,16 +22,22 @@ HEADERS = {
 }
 
 
+def clean_value(value: str) -> str:
+    return value.strip().replace("'''", "").strip()
+
+
 def extract_field(text: str, field: str) -> str:
     pattern = rf"^\|{re.escape(field)}\s*=\s*(.*)$"
     match = re.search(pattern, text, re.MULTILINE)
-    return match.group(1).strip() if match else ""
+    return clean_value(match.group(1)) if match else ""
 
 
 def fetch_player_raw(title: str) -> str:
     url = f"https://liquipedia.net/counterstrike/{title}?action=raw"
+
     response = requests.get(url, headers=HEADERS, timeout=30)
     response.raise_for_status()
+
     return response.text
 
 
@@ -57,7 +62,7 @@ def upsert_player(conn, player: dict) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO cs_players (
+            INSERT INTO public.cs_players (
                 liquipedia_title,
                 alias,
                 real_name,
@@ -104,6 +109,8 @@ def upsert_player(conn, player: dict) -> None:
 
 
 def main():
+    print("Starting Liquipedia test scrape...")
+
     conn = psycopg2.connect(DATABASE_URL)
 
     try:
@@ -113,16 +120,25 @@ def main():
             raw_text = fetch_player_raw(title)
             player = parse_player(title, raw_text)
 
-            print(player)
+            print(
+                f"Parsed: {player['alias']} | "
+                f"{player['real_name']} | "
+                f"{player['team']} | "
+                f"{player['steam64']}"
+            )
 
             upsert_player(conn, player)
             conn.commit()
 
-            # Liquipedia open API/general safe pacing.
+            print(f"Saved {title}")
+
+            # Keep this slow for Liquipedia.
             time.sleep(2.5)
 
     finally:
         conn.close()
+
+    print("Done.")
 
 
 if __name__ == "__main__":
