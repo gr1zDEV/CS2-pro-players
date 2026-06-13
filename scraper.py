@@ -10,16 +10,24 @@ import requests
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "contact@example.com")
-MAJOR_NAME = "IEM Cologne Major 2026"
 
 HEADERS = {
-    "User-Agent": f"cs2you-major-roster-test/0.1 ({CONTACT_EMAIL})",
+    "User-Agent": f"cs2you-player-list-test/0.1 ({CONTACT_EMAIL})",
     "Accept-Encoding": "gzip",
 }
 
 
 def title_to_url_path(title: str) -> str:
     return quote(title.replace(" ", "_"), safe="")
+
+
+def load_players() -> list[str]:
+    with open("players.txt", "r", encoding="utf-8") as f:
+        return [
+            line.strip()
+            for line in f.readlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
 
 
 def clean_value(value: str) -> str:
@@ -73,83 +81,6 @@ def parse_player(title: str, raw_text: str) -> dict:
     }
 
 
-def load_major_teams() -> list[dict]:
-    rows = []
-
-    with open("major_teams.txt", "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-
-            if not line or line.startswith("#"):
-                continue
-
-            parts = line.split("|")
-
-            if len(parts) != 3:
-                print(f"Skipping bad line: {line}")
-                continue
-
-            team_title = parts[0].strip()
-            major_stage = parts[1].strip()
-            player_titles = [
-                player.strip()
-                for player in parts[2].split(",")
-                if player.strip()
-            ]
-
-            rows.append({
-                "team_title": team_title,
-                "major_stage": major_stage,
-                "player_titles": player_titles,
-            })
-
-    return rows
-
-
-def upsert_team(conn, team_title: str, major_stage: str) -> int:
-    team = {
-        "liquipedia_title": team_title,
-        "name": team_title,
-        "major_stage": major_stage,
-        "major_name": MAJOR_NAME,
-        "source_url": f"https://liquipedia.net/counterstrike/{title_to_url_path(team_title)}",
-        "last_checked": datetime.now(timezone.utc),
-    }
-
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO public.teams (
-                liquipedia_title,
-                name,
-                major_stage,
-                major_name,
-                source_url,
-                last_checked
-            )
-            VALUES (
-                %(liquipedia_title)s,
-                %(name)s,
-                %(major_stage)s,
-                %(major_name)s,
-                %(source_url)s,
-                %(last_checked)s
-            )
-            ON CONFLICT (liquipedia_title)
-            DO UPDATE SET
-                name = EXCLUDED.name,
-                major_stage = EXCLUDED.major_stage,
-                major_name = EXCLUDED.major_name,
-                source_url = EXCLUDED.source_url,
-                last_checked = EXCLUDED.last_checked
-            RETURNING id;
-            """,
-            team,
-        )
-
-        return cur.fetchone()[0]
-
-
 def upsert_player(conn, player: dict) -> int:
     with conn.cursor() as cur:
         cur.execute(
@@ -200,84 +131,40 @@ def upsert_player(conn, player: dict) -> int:
         return cur.fetchone()[0]
 
 
-def upsert_membership(conn, player_id: int, team_id: int, source: str) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO public.player_team_memberships (
-                player_id,
-                team_id,
-                is_current,
-                source,
-                last_checked
-            )
-            VALUES (%s, %s, true, %s, %s)
-            ON CONFLICT (player_id, team_id)
-            DO UPDATE SET
-                is_current = true,
-                source = EXCLUDED.source,
-                last_checked = EXCLUDED.last_checked;
-            """,
-            (
-                player_id,
-                team_id,
-                source,
-                datetime.now(timezone.utc),
-            ),
-        )
-
-
 def main():
-    print("Starting major roster scrape...")
+    print("Starting players.txt scrape...")
 
-    rows = load_major_teams()
-    print(f"Loaded {len(rows)} teams from major_teams.txt")
+    players = load_players()
+    print(f"Loaded {len(players)} players from players.txt")
 
     conn = psycopg2.connect(DATABASE_URL, sslmode="require")
 
     try:
-        for row in rows:
-            team_title = row["team_title"]
-            major_stage = row["major_stage"]
-            player_titles = row["player_titles"]
-
-            print(f"\nProcessing team: {team_title} | {major_stage}")
-
+        for title in players:
             try:
-                team_id = upsert_team(conn, team_title, major_stage)
+                print(f"Fetching player: {title}")
+
+                raw_text = fetch_raw(title)
+                player = parse_player(title, raw_text)
+
+                if not player["alias"] and not player["steam64"]:
+                    print(f"Skipping non-player page: {title}")
+                    continue
+
+                upsert_player(conn, player)
                 conn.commit()
-            except Exception as team_error:
+
+                print(
+                    f"Saved: {player['alias']} | "
+                    f"{player['real_name']} | "
+                    f"{player['steam64']}"
+                )
+
+            except Exception as e:
                 conn.rollback()
-                print(f"Failed team {team_title}: {team_error}")
-                continue
+                print(f"Failed {title}: {e}")
 
-            for player_title in player_titles:
-                try:
-                    print(f"Fetching player: {player_title}")
-
-                    raw_text = fetch_raw(player_title)
-                    player = parse_player(player_title, raw_text)
-
-                    if not player["alias"] and not player["steam64"]:
-                        print(f"Skipping non-player page: {player_title}")
-                        continue
-
-                    player_id = upsert_player(conn, player)
-                    upsert_membership(conn, player_id, team_id, "major_teams.txt")
-                    conn.commit()
-
-                    print(
-                        f"Saved: {team_title} | "
-                        f"{major_stage} | "
-                        f"{player['alias']} | "
-                        f"{player['steam64']}"
-                    )
-
-                except Exception as player_error:
-                    conn.rollback()
-                    print(f"Failed player {player_title}: {player_error}")
-
-                time.sleep(2.5)
+            time.sleep(2.5)
 
     finally:
         conn.close()
