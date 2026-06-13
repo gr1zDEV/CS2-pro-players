@@ -111,7 +111,7 @@ def upsert_player(conn, player: dict) -> None:
 def main():
     print("Starting Liquipedia test scrape...")
 
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
 
     try:
         for title in PLAYERS:
@@ -132,7 +132,6 @@ def main():
 
             print(f"Saved {title}")
 
-            # Keep this slow for Liquipedia.
             time.sleep(2.5)
 
     finally:
